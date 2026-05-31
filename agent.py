@@ -6,6 +6,7 @@ os.environ['SSL_CERT_FILE'] = certifi.where()
 
 import logging
 import json
+import asyncio
 from dotenv import load_dotenv
 
 from livekit import agents, api
@@ -16,6 +17,7 @@ from livekit.plugins import (
     deepgram,
     noise_cancellation,
     silero,
+    elevenlabs,
     sarvam,
 )
 from livekit.agents import llm
@@ -39,23 +41,30 @@ def _build_tts(config_provider: str = None, config_voice: str = None):
     # Priority: Config > Env Var > Default
     provider = (config_provider or os.getenv("TTS_PROVIDER", config.DEFAULT_TTS_PROVIDER)).lower()
     
-    # If using Sarvam Voice names (Anushka/Aravind), force Sarvam provider
-    if config_voice in ["anushka", "aravind", "amartya", "dhruv"]:
-        provider = "sarvam"
-
     if provider == "cartesia":
         logger.info("Using Cartesia TTS")
         model = os.getenv("CARTESIA_TTS_MODEL", config.CARTESIA_MODEL)
         voice = os.getenv("CARTESIA_TTS_VOICE", config.CARTESIA_VOICE)
         return cartesia.TTS(model=model, voice=voice)
     
+    if provider == "elevenlabs":
+        logger.info("Using ElevenLabs TTS")
+        model = os.getenv("ELEVENLABS_TTS_MODEL", config.ELEVENLABS_MODEL)
+        voice = config_voice or os.getenv("ELEVENLABS_TTS_VOICE", config.ELEVENLABS_VOICE)
+        return elevenlabs.TTS(
+            api_key=os.getenv("ELEVENLABS_API_KEY"),
+            model=model,
+            voice_id=voice
+        )
+    
     if provider == "sarvam":
-        logger.info(f"Using Sarvam TTS (Voice: {config_voice})")
-        model = os.getenv("SARVAM_TTS_MODEL", config.SARVAM_MODEL)
-        # Use dynamic voice or env var or default
-        voice = config_voice or os.getenv("SARVAM_VOICE", "anushka")
-        language = os.getenv("SARVAM_LANGUAGE", config.SARVAM_LANGUAGE)
-        return sarvam.TTS(model=model, speaker=voice, target_language_code=language)
+        logger.info("Using Sarvam TTS")
+        return sarvam.TTS(
+            api_key=os.getenv("SARVAM_API_KEY"),
+            model=os.getenv("SARVAM_TTS_MODEL", "bulbul:v3"),
+            speaker=config_voice or os.getenv("SARVAM_TTS_VOICE", "anushka"),
+            target_language_code=os.getenv("SARVAM_TTS_LANGUAGE", "en-IN"),
+        )
 
     if provider == "deepgram":
         logger.info("Using Deepgram TTS")
@@ -72,6 +81,15 @@ def _build_tts(config_provider: str = None, config_voice: str = None):
 def _build_llm(config_provider: str = None):
     """Configure the LLM provider based on config or env vars."""
     provider = (config_provider or os.getenv("LLM_PROVIDER", config.DEFAULT_LLM_PROVIDER)).lower()
+
+    if provider == "gemini":
+        logger.info("Using Gemini LLM")
+        return openai.LLM(
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            api_key=os.getenv("GEMINI_API_KEY"),
+            model="gemini-1.5-flash",
+            temperature=0.7,
+        )
 
     if provider == "groq":
         logger.info("Using Groq LLM")
@@ -95,7 +113,7 @@ class TransferFunctions(llm.ToolContext):
         self.phone_number = phone_number
 
     @llm.function_tool(description="Look up user details by phone number.")
-    def lookup_user(self, phone: str):
+    async def lookup_user(self, phone: str):
         """
         Mock function to look up user details.
 
@@ -108,7 +126,10 @@ class TransferFunctions(llm.ToolContext):
     @llm.function_tool(description="Transfer the call to a human support agent or another phone number.")
     async def transfer_call(self, destination: Optional[str] = None):
         """
-        Transfer the call.
+        Transfer the call to another phone number.
+
+        Args:
+            destination: The target phone number to transfer to (in E.164 format, e.g., +917971442049). If not specified, defaults to the administration number.
         """
         if destination is None:
             destination = config.DEFAULT_TRANSFER_NUMBER
@@ -269,12 +290,12 @@ async def entrypoint(ctx: agents.JobContext):
                     wait_until_answered=True, # Important: Wait for pickup before continuing
                 )
             )
-            logger.info("Call answered! Agent is now listening.")
+            logger.info("Call answered! Agent is now listening. Applying 2-second stabilization buffer.")
             
-            # Note: We do NOT generate an initial reply here immediately.
-            # Usually for outbound, we want to hear "Hello?" from the user first,
-            # OR we can speak immediately. 
-            # If you want the agent to speak first, uncomment the lines below:
+            # 2-second stabilization delay for carrier network
+            await asyncio.sleep(2.0)
+            
+            logger.info("Buffer complete. Speaking initial greeting.")
             
             await session.generate_reply(
                 instructions=config.INITIAL_GREETING
