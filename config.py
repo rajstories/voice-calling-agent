@@ -80,7 +80,8 @@ GST number | exact BOM | stock aur availability
 Naam | Company | Role (dealer/EPC/installer) | Mobile | WhatsApp | Email | Project type | Capacity kWp | Phase (single/three) | Roof type (RCC/Sheet/Bina structure) | Quantity | Delivery city | Expected purchase date
 """
 
-INITIAL_GREETING = "Call connect ho gayi hai. Ab SIRF EK BAAR yeh opening line bolo: 'Hello sir, namaskar. Main Raj bol raha hoon UPM Consultancy se. Kya aap abhi 2 minute baat kar sakte hain?' — Iske baad customer ka jawab suno aur conversation naturally aage badha. Dobara greet bilkul mat karna."
+# Direct speech — say exactly this, nothing more, nothing less
+INITIAL_GREETING = "Say exactly this and nothing else: 'Hello sir, namaskar. Main Raj bol raha hoon UPM Consultancy se. Kya aap abhi 2 minute baat kar sakte hain?' Then wait silently for the customer to respond. Do NOT add any extra words before or after."
 
 fallback_greeting = "Hello sir, namaskar. Main Raj bol raha hoon UPM Consultancy se. Kya main aapki kuch madad kar sakta hoon?"
 
@@ -88,8 +89,9 @@ fallback_greeting = "Hello sir, namaskar. Main Raj bol raha hoon UPM Consultancy
 # --- 2. SPEECH-TO-TEXT (STT) SETTINGS ---
 # We use Deepgram for high-speed transcription.
 STT_PROVIDER = "deepgram"
-STT_MODEL = "nova-2"  # Recommended: "nova-2" (balanced) or "nova-3" (newest)
-STT_LANGUAGE = "en"   # "en" supports multi-language code switching in Nova 2
+STT_MODEL = "nova-2"          # nova-2 has best Hindi + Hinglish support
+STT_LANGUAGE = "hi"           # "hi" = Hindi-first; handles Hindi+English code-switching (Hinglish)
+                              # Do NOT use "en" — it drops Hindi words entirely
 
 
 # Choose your voice provider: "openai", "elevenlabs" (Indian & multilingual), "sarvam" (Native Indian/Hinglish), or "cartesia" (Ultra-fast)

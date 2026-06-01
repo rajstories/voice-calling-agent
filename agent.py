@@ -87,7 +87,7 @@ def _build_llm(config_provider: str = None):
         return openai.LLM(
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
             api_key=os.getenv("GEMINI_API_KEY"),
-            model="gemini-2.5-flash",
+            model="gemini-2.5-flash-lite-preview-06-17",  # Lite variant: much lower TTFT than full 2.5-flash
             temperature=0.7,
         )
 
@@ -238,10 +238,17 @@ async def entrypoint(ctx: agents.JobContext):
 
     # Initialize the Agent Session with plugins
     session = AgentSession(
-        vad=silero.VAD.load(),
+        vad=silero.VAD.load(
+            min_silence_duration=0.6,      # wait 600ms of silence before treating as end-of-speech
+            activation_threshold=0.65,     # slightly higher to ignore SIP background noise / compression
+            min_speech_duration=0.15,      # ignore very short noise spikes
+            max_buffered_speech=60.0,      # allow long sentences without cutting off
+        ),
         stt=deepgram.STT(model=config.STT_MODEL, language=config.STT_LANGUAGE), 
         llm=_build_llm(config_dict.get("model_provider")),
         tts=_build_tts(config_dict.get("model_provider"), config_dict.get("voice_id")),
+        min_endpointing_delay=0.5,         # wait at least 500ms after speech ends before responding
+        max_endpointing_delay=6.0,         # give up waiting for more speech after 6s
     )
 
     # Start the session
