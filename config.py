@@ -81,7 +81,11 @@ GST number | exact BOM | stock और availability
 नाम | Company | Role (dealer/EPC/installer) | Mobile | WhatsApp | Email | Project type | Capacity kWp | Phase (single/three) | Roof type (RCC/Sheet/बिना structure) | Quantity | Delivery city | Expected purchase date
 """
 
-# Direct speech — say exactly this, nothing more, nothing less
+# Actual speech text — sent directly to TTS via session.say(), bypasses LLM entirely
+# This avoids the Gemini "contents is not specified" error on empty conversation start
+INITIAL_GREETING_TEXT = "हेलो सर, नमस्कार। मैं Raj बोल रहा हूँ UPM Consultancy से। क्या आप अभी दो minute बात कर सकते हैं?"
+
+# Fallback LLM instruction (used only if session.say() is unavailable)
 INITIAL_GREETING = "Say exactly this and nothing else: 'हेलो सर, नमस्कार। मैं Raj बोल रहा हूँ UPM Consultancy से। क्या आप अभी दो minute बात कर सकते हैं?' Then wait silently for the customer to respond. Do NOT add any extra words before or after."
 
 fallback_greeting = "हेलो सर, नमस्कार। मैं Raj बोल रहा हूँ UPM Consultancy से। क्या मैं आपकी कुछ मदद कर सकता हूँ?"

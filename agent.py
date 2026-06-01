@@ -298,8 +298,12 @@ async def entrypoint(ctx: agents.JobContext):
             
             logger.info("Buffer complete. Speaking initial greeting.")
             
-            await session.generate_reply(
-                instructions=config.INITIAL_GREETING
+            # Use session.say() to send greeting DIRECTLY to TTS — no LLM round-trip.
+            # This avoids Gemini's 400 error ("contents is not specified") when
+            # generate_reply() is called with no prior conversation context.
+            await session.say(
+                config.INITIAL_GREETING_TEXT,
+                allow_interruptions=False,   # don't let background noise cut off the greeting
             )
             
         except Exception as e:
@@ -307,10 +311,12 @@ async def entrypoint(ctx: agents.JobContext):
             # Ensure we clean up if the call fails
             ctx.shutdown()
     else:
-        # Fallback for inbound calls (if this agent is used for that) OR Dashboard calls where user is already there
+        # Fallback for inbound calls (user is already in room)
         logger.info("Detecting if we should greet...")
-        # Give a small delay for audio to stabilize if user just joined
-        await session.generate_reply(instructions=config.fallback_greeting)
+        await session.say(
+            config.fallback_greeting,
+            allow_interruptions=False,
+        )
 
 
 if __name__ == "__main__":
