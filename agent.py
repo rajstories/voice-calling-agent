@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 
 from livekit import agents, api
 from livekit.agents import AgentSession, Agent, RoomInputOptions
+from livekit.agents import TurnHandlingOptions
+from livekit.agents.voice.turn import EndpointingOptions
 from livekit.plugins import (
     openai,
     cartesia,
@@ -111,17 +113,6 @@ class TransferFunctions(llm.ToolContext):
         super().__init__(tools=[])
         self.ctx = ctx
         self.phone_number = phone_number
-
-    @llm.function_tool(description="Look up user details by phone number.")
-    async def lookup_user(self, phone: str):
-        """
-        Mock function to look up user details.
-
-        Args:
-            phone: The phone number to look up
-        """
-        logger.info(f"Looking up user: {phone}")
-        return f"User found: Shreyas Raj. Status: Premium. Last order: Coffee setup (Delivered)."
 
     @llm.function_tool(description="Transfer the call to a human support agent or another phone number.")
     async def transfer_call(self, destination: Optional[str] = None):
@@ -247,8 +238,12 @@ async def entrypoint(ctx: agents.JobContext):
         stt=deepgram.STT(model=config.STT_MODEL, language=config.STT_LANGUAGE), 
         llm=_build_llm(config_dict.get("model_provider")),
         tts=_build_tts(config_dict.get("model_provider"), config_dict.get("voice_id")),
-        min_endpointing_delay=0.5,         # wait at least 500ms after speech ends before responding
-        max_endpointing_delay=6.0,         # give up waiting for more speech after 6s
+        turn_handling=TurnHandlingOptions(
+            endpointing=EndpointingOptions(
+                min_delay=0.5,   # wait at least 500ms after speech ends before responding
+                max_delay=6.0,   # give up waiting for more speech after 6s
+            )
+        ),
     )
 
     # Start the session
@@ -257,7 +252,6 @@ async def entrypoint(ctx: agents.JobContext):
         agent=OutboundAssistant(tools=list(fnc_ctx.function_tools.values())),
         room_input_options=RoomInputOptions(
             noise_cancellation=noise_cancellation.BVCTelephony(),
-            close_on_disconnect=True, # Close room when agent disconnects
         ),
     )
 
