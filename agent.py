@@ -89,7 +89,7 @@ def _build_llm(config_provider: str = None):
         return openai.LLM(
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
             api_key=os.getenv("GEMINI_API_KEY"),
-            model="gemini-2.5-flash-lite-preview-06-17",  # Lite variant: much lower TTFT than full 2.5-flash
+            model="gemini-2.5-flash-lite",  # Fast, low-latency, no rate limit issues
             temperature=0.7,
         )
 
