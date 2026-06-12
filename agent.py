@@ -252,21 +252,113 @@ class TransferFunctions(llm.ToolContext):
 
 class OutboundAssistant(Agent):
     """
-    An AI agent tailored for outbound calls.
+    Outbound voice agent with LangGraph turn management.
 
-    Receives a compiled TenantConfig so the system prompt is dynamically
-    assembled from the tenant's identity fields (agent_name, company_name,
-    base_system_prompt) rather than the old static config.SYSTEM_PROMPT.
+    Each instance owns:
+      - tenant         : The resolved TenantConfig for this call.
+      - _call_state    : The mutable LangGraph State dict for this call's
+                         conversation, updated in-place on every turn.
+      - _session       : Back-reference to AgentSession so on_user_turn_completed
+                         can call session.say() without capturing it in a closure.
 
-    In Phase 2, this class will also hold a reference to the per-call
-    LangGraph state so the LiveKit turn pipeline can consult it.
+    on_user_turn_completed() intercepts every completed Deepgram STT transcript
+    BEFORE the default LLM pipeline fires, routes it through the compiled
+    sales_graph, and speaks the graph's reply directly via the TTS pipeline.
+    The raw LLM generate_reply() call is suppressed by returning early.
     """
-    def __init__(self, tools: list, tenant: TenantConfig) -> None:
+    def __init__(
+        self,
+        tools: list,
+        tenant: TenantConfig,
+        call_graph_state: dict,
+        session: "AgentSession",
+    ) -> None:
         super().__init__(
             instructions=tenant.build_system_prompt(),
             tools=tools,
         )
         self.tenant = tenant
+        self._call_state: dict = call_graph_state
+        self._session: AgentSession = session
+
+    async def on_user_turn_completed(
+        self,
+        turn_ctx,          # livekit.agents.llm.ChatContext
+        new_message,       # livekit.agents.llm.ChatMessage — the completed utterance
+    ) -> None:
+        """
+        Intercepts the completed STT transcript and routes it through the
+        LangGraph sales_graph instead of the raw LLM.
+
+        Steps
+        -----
+        1. Extract the plain-text transcript from the LiveKit ChatMessage.
+        2. Append the user turn to the shared graph state.
+        3. Invoke the compiled sales_graph asynchronously (one full turn).
+        4. Update the shared state with the new state returned by the graph.
+        5. Extract the last assistant message produced by the active node.
+        6. Speak the reply via session.say() — TTS only, no extra LLM round-trip.
+        7. Return without calling super() to suppress the default LLM pipeline.
+        """
+        # Step 1 — extract transcript
+        transcript: str = ""
+        if hasattr(new_message, "text_content"):
+            transcript = new_message.text_content or ""
+        elif hasattr(new_message, "content"):
+            content = new_message.content
+            if isinstance(content, str):
+                transcript = content
+            elif isinstance(content, list):
+                # ChatMessage.content can be a list of content parts
+                parts = [p.text if hasattr(p, "text") else str(p) for p in content]
+                transcript = " ".join(parts)
+
+        transcript = transcript.strip()
+        if not transcript:
+            logger.debug(f"[{self.tenant.tenant_id}] Empty transcript — skipping graph invocation.")
+            return
+
+        logger.info(f"[{self.tenant.tenant_id}] STT transcript: {transcript!r}")
+
+        # Step 2 — inject the fresh user input into state
+        self._call_state["last_user_input"] = transcript
+
+        # Step 3 — invoke LangGraph for this turn (runs async, off the audio thread)
+        try:
+            new_state: dict = await sales_graph.ainvoke(
+                self._call_state,
+                config={"configurable": {"thread_id": self.tenant.tenant_id}},
+            )
+        except Exception as exc:
+            logger.error(
+                f"[{self.tenant.tenant_id}] LangGraph ainvoke failed: {exc}",
+                exc_info=True,
+            )
+            # Graceful degradation — let the user know we hit a glitch
+            await self._session.say(
+                "I'm sorry, I had a technical issue. Could you repeat that?",
+                allow_interruptions=True,
+            )
+            return
+
+        # Step 4 — persist the updated state for the next turn
+        self._call_state = new_state
+
+        # Step 5 — extract the last assistant message produced by the active node
+        messages = new_state.get("messages", [])
+        assistant_msgs = [m for m in messages if m.get("role") == "assistant"]
+        agent_reply: str = assistant_msgs[-1]["content"] if assistant_msgs else ""
+
+        if not agent_reply:
+            logger.warning(f"[{self.tenant.tenant_id}] Graph returned no assistant message — skipping say().")
+            return
+
+        logger.info(f"[{self.tenant.tenant_id}] Graph reply [{new_state.get('current_stage')}]: {agent_reply!r}")
+
+        # Step 6 — speak the graph reply directly via TTS (no LLM latency)
+        await self._session.say(agent_reply, allow_interruptions=True)
+
+        # Step 7 — returning here suppresses LiveKit's default generate_reply() call
 
 
 
@@ -325,9 +417,9 @@ async def entrypoint(ctx: agents.JobContext):
     )
 
     # -----------------------------------------------------------------------
-    # Step 3: Initialise per-call graph state
-    #   This dict is the Phase 2 integration point for LangGraph.
-    #   See the ═══ LANGGRAPH INTEGRATION HOOK ═══ block below for details.
+    # Step 3: Initialise per-call LangGraph state
+    #   One State dict per call — mutated in-place on every turn inside
+    #   OutboundAssistant.on_user_turn_completed().
     # -----------------------------------------------------------------------
     call_graph_state: dict = {
         "messages":        [],
@@ -336,9 +428,6 @@ async def entrypoint(ctx: agents.JobContext):
         "last_user_input": "",
         "rag_context":     "",
     }
-    # Reference to the compiled graph — ready for Phase 2 ainvoke() calls.
-    # In Phase 1, this object exists but is NOT yet called from the audio loop.
-    _graph = sales_graph  # noqa: F841  (used in Phase 2 wiring below)
 
     # -----------------------------------------------------------------------
     # Step 4: Build model providers from TenantConfig
@@ -348,87 +437,12 @@ async def entrypoint(ctx: agents.JobContext):
     # Initialize transfer/tool functions
     fnc_ctx = TransferFunctions(ctx, phone_number, tenant)
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # ═══          LANGGRAPH INTEGRATION HOOK  (Phase 2 target)           ═══
-    # ═══════════════════════════════════════════════════════════════════════
-    #
-    # CURRENT STATE (Phase 1):
-    #   LiveKit's AgentSession handles the full STT → LLM → TTS pipeline
-    #   automatically. Deepgram transcripts flow directly into the raw LLM
-    #   (Gemini / Groq / Ollama) via the livekit-agents turn pipeline.
-    #
-    # PHASE 2 WIRING PLAN:
-    #   We will intercept the Deepgram transcript BEFORE it reaches the LLM
-    #   by hooking into one of the following LiveKit Agents extension points:
-    #
-    #   OPTION A — Override Agent.on_user_turn_completed() (recommended)
-    #   ────────────────────────────────────────────────────────────────────
-    #   class OutboundAssistant(Agent):
-    #       async def on_user_turn_completed(
-    #           self,
-    #           turn_ctx: ChatContext,          # contains the full chat history
-    #           new_message: ChatMessage,       # the just-transcribed user utterance
-    #       ) -> None:
-    #
-    #           # 1. Extract the plain-text transcript from the LiveKit message.
-    #           transcript: str = new_message.text_content
-    #
-    #           # 2. Update the per-call LangGraph state with the new input.
-    #           self._call_graph_state["last_user_input"] = transcript
-    #
-    #           # 3. Invoke the LangGraph asynchronously.
-    #           #    sales_graph.ainvoke() runs the node chain for ONE turn:
-    #           #      discovery_node → (route) → objection_node / rag_lookup_node
-    #           new_state = await sales_graph.ainvoke(
-    #               self._call_graph_state,
-    #               config={"configurable": {"thread_id": self.tenant.tenant_id}}
-    #           )
-    #
-    #           # 4. Update shared state for the next turn.
-    #           self._call_graph_state = new_state
-    #
-    #           # 5. Extract the last assistant message produced by the active node.
-    #           assistant_msgs = [
-    #               m for m in new_state["messages"]
-    #               if m.get("role") == "assistant"
-    #           ]
-    #           agent_reply: str = assistant_msgs[-1]["content"] if assistant_msgs else ""
-    #
-    #           # 6. Speak the reply directly via TTS, bypassing the raw LLM entirely.
-    #           #    session.say() pushes the text straight to the TTS pipeline,
-    #           #    so latency = (RAGFlow retrieval) + (TTS synthesis) only.
-    #           if agent_reply:
-    #               await session.say(agent_reply, allow_interruptions=True)
-    #
-    #           # 7. Suppress the default LLM generate_reply() call so the
-    #           #    livekit-agents pipeline does NOT also fire its own LLM call.
-    #           return   # Returning here signals LiveKit to skip default handling
-    #
-    #   OPTION B — Attach an on_transcript event listener to the STT stream
-    #   ────────────────────────────────────────────────────────────────────
-    #   @session.on("user_speech_committed")
-    #   async def _on_transcript(event: SpeechEvent):
-    #       transcript = event.alternatives[0].text
-    #       call_graph_state["last_user_input"] = transcript
-    #       new_state = await sales_graph.ainvoke(call_graph_state)
-    #       call_graph_state.update(new_state)
-    #       reply = [m for m in new_state["messages"] if m["role"] == "assistant"][-1]["content"]
-    #       await session.say(reply)
-    #
-    # WHY OPTION A IS PREFERRED:
-    #   on_user_turn_completed() fires AFTER VAD silence detection completes
-    #   the full utterance, giving us access to the complete transcript in one
-    #   shot. Option B fires on every partial/interim STT event and requires
-    #   additional debouncing.
-    #
-    # PORTING NOTE FOR RAG CONTEXT:
-    #   The rag_lookup_node in state_graph.py already calls
-    #   query_knowledge_base() from rag_client.py. When the RAGFlow server
-    #   is live, only the two commented-out lines in _call_ragflow_api() need
-    #   to be uncommented — no graph changes required.
-    # ═══════════════════════════════════════════════════════════════════════
-
-    # Initialize the Agent Session with tenant-resolved model providers
+    # -----------------------------------------------------------------------
+    # Step 5: Build the AgentSession
+    #   session is created first so that the OutboundAssistant can hold a
+    #   back-reference to it for session.say() calls inside
+    #   on_user_turn_completed() without a closure capture.
+    # -----------------------------------------------------------------------
     session = AgentSession(
         vad=silero.VAD.load(
             min_silence_duration=0.6,   # 600 ms silence → end-of-speech
@@ -447,12 +461,16 @@ async def entrypoint(ctx: agents.JobContext):
         ),
     )
 
-    # Start the session — binds the audio pipeline to this LiveKit room
+    # Start the session — binds the audio pipeline to this LiveKit room.
+    # OutboundAssistant receives both call_graph_state and the session reference
+    # so on_user_turn_completed() can invoke the graph and speak replies.
     await session.start(
         room=ctx.room,
         agent=OutboundAssistant(
             tools=list(fnc_ctx.function_tools.values()),
             tenant=tenant,
+            call_graph_state=call_graph_state,
+            session=session,
         ),
         room_input_options=RoomInputOptions(
             noise_cancellation=noise_cancellation.BVCTelephony(),
