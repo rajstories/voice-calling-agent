@@ -42,6 +42,7 @@ from config import TenantConfig, build_tenant_config_from_metadata
 # See the ═══ LANGGRAPH INTEGRATION HOOK ═══ comment block further below.
 # ---------------------------------------------------------------------------
 from state_graph import sales_graph
+from langchain_core.messages import HumanMessage, AIMessage
 
 
 def _build_tts(tenant: TenantConfig):
@@ -322,6 +323,7 @@ class OutboundAssistant(Agent):
 
         # Step 2 — inject the fresh user input into state
         self._call_state["last_user_input"] = transcript
+        self._call_state["messages"].append(HumanMessage(content=transcript))
 
         # Step 3 — invoke LangGraph for this turn (runs async, off the audio thread)
         try:
@@ -346,14 +348,25 @@ class OutboundAssistant(Agent):
 
         # Step 5 — extract the last assistant message produced by the active node
         messages = new_state.get("messages", [])
-        assistant_msgs = [m for m in messages if m.get("role") == "assistant"]
-        agent_reply: str = assistant_msgs[-1]["content"] if assistant_msgs else ""
+        assistant_msgs = []
+        for m in messages:
+            if isinstance(m, dict):
+                if m.get("role") == "assistant":
+                    assistant_msgs.append(m.get("content", ""))
+            else:
+                if m.__class__.__name__ == "AIMessage" or getattr(m, "type", "") == "ai":
+                    assistant_msgs.append(getattr(m, "content", ""))
+        
+        agent_reply: str = assistant_msgs[-1] if assistant_msgs else ""
 
         if not agent_reply:
             logger.warning(f"[{self.tenant.tenant_id}] Graph returned no assistant message — skipping say().")
             return
 
         logger.info(f"[{self.tenant.tenant_id}] Graph reply [{new_state.get('current_stage')}]: {agent_reply!r}")
+
+        # Append AI response to messages history
+        self._call_state["messages"].append(AIMessage(content=agent_reply))
 
         # Step 6 — speak the graph reply directly via TTS (no LLM latency)
         await self._session.say(agent_reply, allow_interruptions=True)
