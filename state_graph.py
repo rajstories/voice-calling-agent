@@ -166,25 +166,31 @@ async def discovery_node(state: State) -> dict:
 
     # ------------------------------------------------------------------
     # STUB: rule-based routing (replace with LLM classification in Phase 2)
+    # KEY DESIGN NOTE: route_from_discovery() must ALWAYS return END or a
+    # leaf node — never loop back to discovery_node within a single ainvoke()
+    # call. The inter-turn loop is handled externally: agent.py calls ainvoke()
+    # once per STT transcript, so each graph execution must terminate at END.
     # ------------------------------------------------------------------
-    objection_keywords  = ["expensive", "costly", "price", "discount", "mahanga", "problem",
-                           "other brand", "competitor", "not interested", "busy"]
-    rag_trigger_keywords = ["what", "how much", "price", "warranty", "specification",
-                            "availability", "stock", "inverter", "kwp", "capacity"]
+    objection_keywords   = ["expensive", "costly", "price", "discount", "mahanga",
+                             "problem", "other brand", "competitor", "not interested", "busy"]
+    rag_trigger_keywords = ["what", "how much", "warranty", "specification",
+                             "availability", "stock", "inverter", "kwp", "capacity"]
     end_keywords         = ["bye", "goodbye", "ok send", "whatsapp", "call later",
-                            "no need", "not now"]
+                             "no need", "not now"]
 
     if any(kw in user_input for kw in end_keywords):
         next_stage = "end"
         reply = "Understood, sir. I'll send you the details on WhatsApp. Have a great day!"
     elif any(kw in user_input for kw in objection_keywords):
-        next_stage = "objection"
+        next_stage = "objection"   # → objection_node → END
         reply = "I understand your concern, sir. Let me address that."
     elif any(kw in user_input for kw in rag_trigger_keywords):
-        next_stage = "rag_lookup"
+        next_stage = "rag_lookup"  # → rag_lookup_node → END
         reply = "Good question, sir. Let me look that up for you right now."
     else:
-        next_stage = "discovery"
+        # Default: qualifying turn — reply and END this invocation.
+        # agent.py will re-invoke the graph on the next user transcript.
+        next_stage = "done"
         reply = "Got it, sir. Could you tell me a bit more about the type of project you are working on?"
     # ------------------------------------------------------------------
 
@@ -309,21 +315,27 @@ def route_from_discovery(state: State) -> str:
     Reads the `current_stage` field written by discovery_node and returns
     the corresponding node name (or END sentinel) for LangGraph to route to.
 
+    CRITICAL: This function must NEVER return "discovery_node" — that would
+    create an infinite loop within a single ainvoke() call. The inter-turn
+    conversational loop is managed externally by agent.py, which calls
+    ainvoke() once per completed STT transcript.
+
     Returns
     -------
     str
-        One of: "objection_node" | "rag_lookup_node" | "__end__" | "discovery_node"
+        One of: "objection_node" | "rag_lookup_node" | END
     """
-    stage = state.get("current_stage", "discovery")
+    stage = state.get("current_stage", "done")
 
     routing_map = {
         "objection":  "objection_node",
         "rag_lookup": "rag_lookup_node",
         "end":        END,
-        "discovery":  "discovery_node",   # Loop: keep in discovery for next Q
+        "done":       END,   # Default qualifying turn — terminate this invocation
     }
 
-    next_node = routing_map.get(stage, "discovery_node")
+    # Fallback to END for any unknown stage value (defensive — never loop)
+    next_node = routing_map.get(stage, END)
     logger.debug(f"route_from_discovery: stage={stage!r} → {next_node}")
     return next_node
 
@@ -361,7 +373,9 @@ def build_graph() -> "CompiledGraph":
     # After greeting, always move to discovery
     builder.add_edge("greeting_node", "discovery_node")
 
-    # discovery_node's output stage drives conditional routing
+    # discovery_node's output stage drives conditional routing.
+    # NEVER add "discovery_node" → "discovery_node" here — that causes
+    # GraphRecursionError. Each ainvoke() call processes exactly ONE turn.
     builder.add_conditional_edges(
         source="discovery_node",
         path=route_from_discovery,
@@ -369,15 +383,14 @@ def build_graph() -> "CompiledGraph":
             "objection_node":  "objection_node",
             "rag_lookup_node": "rag_lookup_node",
             END:               END,
-            "discovery_node":  "discovery_node",
         },
     )
 
-    # After objection is handled, always loop back to discovery
-    builder.add_edge("objection_node", "discovery_node")
+    # After objection is handled → END (agent.py re-invokes on next transcript)
+    builder.add_edge("objection_node", END)
 
-    # After RAG lookup, always loop back to discovery
-    builder.add_edge("rag_lookup_node", "discovery_node")
+    # After RAG lookup → END (agent.py re-invokes on next transcript)
+    builder.add_edge("rag_lookup_node", END)
 
     compiled = builder.compile()
     logger.info("StateGraph compiled successfully.")
