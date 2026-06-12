@@ -156,42 +156,117 @@ async def discovery_node(state: State) -> dict:
     Routing signal: this node writes `current_stage` which route_from_discovery()
     reads to decide which edge to follow.
 
-    STUB logic: keyword-based classification stands in for the real LLM call.
-    Replace the stub block with an actual async LLM invocation in Phase 2.
+    Uses conversation history to vary responses and avoid repetition.
     """
     user_input = state.get("last_user_input", "").lower()
     tenant_id  = state["tenant_id"]
+    messages   = state.get("messages", [])
 
-    logger.info(f"[{tenant_id}] discovery_node processing: {user_input!r}")
+    # Count how many assistant turns have occurred (for response variation)
+    assistant_turn_count = sum(
+        1 for m in messages
+        if (isinstance(m, dict) and m.get("role") == "assistant")
+    )
+
+    logger.info(f"[{tenant_id}] discovery_node processing: {user_input!r} (turn #{assistant_turn_count})")
 
     # ------------------------------------------------------------------
-    # STUB: rule-based routing (replace with LLM classification in Phase 2)
-    # KEY DESIGN NOTE: route_from_discovery() must ALWAYS return END or a
-    # leaf node — never loop back to discovery_node within a single ainvoke()
-    # call. The inter-turn loop is handled externally: agent.py calls ainvoke()
-    # once per STT transcript, so each graph execution must terminate at END.
+    # Rule-based routing with expanded keyword coverage
     # ------------------------------------------------------------------
     objection_keywords   = ["expensive", "costly", "price", "discount", "mahanga",
-                             "problem", "other brand", "competitor", "not interested", "busy"]
+                             "problem", "other brand", "competitor", "not interested",
+                             "busy", "no thanks", "don't want", "waste", "scam", "fraud"]
     rag_trigger_keywords = ["what", "how much", "warranty", "specification",
-                             "availability", "stock", "inverter", "kwp", "capacity"]
+                             "availability", "stock", "inverter", "kwp", "capacity",
+                             "details", "features", "model", "panel", "battery",
+                             "subsidy", "emi", "loan", "finance", "install"]
     end_keywords         = ["bye", "goodbye", "ok send", "whatsapp", "call later",
-                             "no need", "not now"]
+                             "no need", "not now", "hang up", "cut the call",
+                             "don't call", "stop calling", "remove my number"]
+    why_calling_keywords = ["why are you calling", "why you calling", "who are you",
+                             "who is this", "what is this about", "what do you want",
+                             "kya chahiye", "kaun", "kyun call", "why call",
+                             "what's this call about", "purpose of this call"]
+    greeting_keywords    = ["hello", "hi", "yes", "yeah", "haan", "ok", "okay",
+                             "sure", "tell me", "go ahead", "listening", "speak",
+                             "bol", "bolo", "haa", "acha", "theek hai", "fine"]
 
+    # --- Route: End the call ---
     if any(kw in user_input for kw in end_keywords):
         next_stage = "end"
         reply = "Understood, sir. I'll send you the details on WhatsApp. Have a great day!"
-    elif any(kw in user_input for kw in objection_keywords):
-        next_stage = "objection"   # → objection_node → END
-        reply = "I understand your concern, sir. Let me address that."
-    elif any(kw in user_input for kw in rag_trigger_keywords):
-        next_stage = "rag_lookup"  # → rag_lookup_node → END
-        reply = "Good question, sir. Let me look that up for you right now."
-    else:
-        # Default: qualifying turn — reply and END this invocation.
-        # agent.py will re-invoke the graph on the next user transcript.
+
+    # --- Route: Customer asks why we're calling ---
+    elif any(kw in user_input for kw in why_calling_keywords):
         next_stage = "done"
-        reply = "Got it, sir. Could you tell me a bit more about the type of project you are working on?"
+        reply = (
+            "Great question, sir! I'm calling from UPM Consultancy. "
+            "We help businesses and homeowners save up to 90% on their electricity bills "
+            "with Tata Solar panel installations. I just wanted to check if you've been "
+            "considering solar for your property?"
+        )
+
+    # --- Route: Objection handling ---
+    elif any(kw in user_input for kw in objection_keywords):
+        next_stage = "objection"
+        reply = "I understand your concern, sir. Let me address that."
+
+    # --- Route: RAG knowledge lookup ---
+    elif any(kw in user_input for kw in rag_trigger_keywords):
+        next_stage = "rag_lookup"
+        reply = "Good question, sir. Let me look that up for you right now."
+
+    # --- Route: Greeting / affirmative / short answer ---
+    elif any(kw in user_input for kw in greeting_keywords):
+        next_stage = "done"
+        # Vary the response based on how far we are in the conversation
+        if assistant_turn_count <= 1:
+            reply = (
+                "Thank you for your time, sir! I'm calling from UPM Consultancy. "
+                "We specialise in Tata Solar panel installations. "
+                "Are you a homeowner, or is this for a commercial project?"
+            )
+        elif assistant_turn_count <= 3:
+            reply = (
+                "That's great to know! Could you tell me roughly how much your "
+                "monthly electricity bill is? This helps me recommend the right system size."
+            )
+        else:
+            reply = (
+                "Perfect. Based on what you've shared, I think a 3kW to 5kW system "
+                "could work well for you. Would you like me to share a detailed quote?"
+            )
+
+    # --- Default: Contextual qualifying response based on turn count ---
+    else:
+        next_stage = "done"
+        if assistant_turn_count <= 1:
+            reply = (
+                "Thank you for sharing that, sir. I'm calling from UPM Consultancy "
+                "regarding Tata Solar panel installations. Could you tell me — "
+                "are you looking at solar for a residential property or a commercial project?"
+            )
+        elif assistant_turn_count <= 2:
+            reply = (
+                "Got it, sir. That's helpful. And roughly how much is your current "
+                "monthly electricity bill? This helps me suggest the best system for you."
+            )
+        elif assistant_turn_count <= 3:
+            reply = (
+                "Thank you. Based on what you've shared, a 3kW to 5kW Tata Solar setup "
+                "could significantly reduce your bills. Shall I share the pricing details?"
+            )
+        elif assistant_turn_count <= 4:
+            reply = (
+                "We have some excellent financing options as well — zero down payment EMIs "
+                "and government subsidies that can cover up to 40% of the cost. "
+                "Would you like me to send you a detailed brochure on WhatsApp?"
+            )
+        else:
+            reply = (
+                "I appreciate your time, sir. Let me share a complete proposal "
+                "with pricing and subsidy details on WhatsApp. Would that work for you?"
+            )
     # ------------------------------------------------------------------
 
     logger.info(f"[{tenant_id}] discovery_node → next_stage={next_stage}")

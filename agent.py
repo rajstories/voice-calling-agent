@@ -323,7 +323,6 @@ class OutboundAssistant(Agent):
 
         # Step 2 — inject the fresh user input into state
         self._call_state["last_user_input"] = transcript
-        self._call_state["messages"].append(HumanMessage(content=transcript))
 
         # Step 3 — invoke LangGraph for this turn (runs async, off the audio thread)
         try:
@@ -364,9 +363,6 @@ class OutboundAssistant(Agent):
             return
 
         logger.info(f"[{self.tenant.tenant_id}] Graph reply [{new_state.get('current_stage')}]: {agent_reply!r}")
-
-        # Append AI response to messages history
-        self._call_state["messages"].append(AIMessage(content=agent_reply))
 
         # Step 6 — speak the graph reply directly via TTS (no LLM latency)
         await self._session.say(agent_reply, allow_interruptions=True)
