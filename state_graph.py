@@ -341,6 +341,21 @@ def route_from_discovery(state: State) -> str:
 
 
 # ---------------------------------------------------------------------------
+#  ENTRY ROUTING
+# ---------------------------------------------------------------------------
+
+def route_entry(state: State) -> str:
+    """
+    Determine the entry point of the graph based on the state.
+    If the greeting has already been added to the messages list,
+    bypass greeting_node and go straight to discovery_node.
+    """
+    if state.get("messages") and len(state["messages"]) > 0:
+        return "discovery_node"
+    return "greeting_node"
+
+
+# ---------------------------------------------------------------------------
 #  GRAPH ASSEMBLY
 # ---------------------------------------------------------------------------
 
@@ -367,7 +382,13 @@ def build_graph() -> "CompiledGraph":
     builder.add_node("rag_lookup_node", rag_lookup_node)
 
     # --- Entry point ---
-    builder.set_entry_point("greeting_node")
+    builder.set_conditional_entry_point(
+        route_entry,
+        {
+            "greeting_node": "greeting_node",
+            "discovery_node": "discovery_node",
+        }
+    )
 
     # --- Edges ---
     # After greeting, always move to discovery

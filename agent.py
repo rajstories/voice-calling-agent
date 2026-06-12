@@ -10,7 +10,7 @@ import asyncio
 from dotenv import load_dotenv
 
 from livekit import agents, api
-from livekit.agents import AgentSession, Agent, RoomInputOptions
+from livekit.agents import AgentSession, Agent, RoomInputOptions, StopResponse
 from livekit.agents import TurnHandlingOptions
 from livekit.agents.voice.turn import EndpointingOptions
 from livekit.plugins import (
@@ -358,7 +358,8 @@ class OutboundAssistant(Agent):
         # Step 6 — speak the graph reply directly via TTS (no LLM latency)
         await self._session.say(agent_reply, allow_interruptions=True)
 
-        # Step 7 — returning here suppresses LiveKit's default generate_reply() call
+        # Step 7 — raise StopResponse to suppress LiveKit's default generate_reply() call
+        raise StopResponse()
 
 
 
