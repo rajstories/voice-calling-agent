@@ -8,3 +8,7 @@ livekit-plugins-elevenlabs>=0.6.0
 livekit-plugins-noise-cancellation
 python-dotenv>=1.0.0
 certifi>=2024.0.0
+
+# Multi-tenant / LangGraph / RAGFlow additions
+httpx>=0.27.0          # Async HTTP client for rag_client.py RAGFlow calls
+langgraph>=0.1.0       # Cyclical conversation state graph (state_graph.py — Task 3)
