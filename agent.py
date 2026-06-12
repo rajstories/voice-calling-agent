@@ -75,7 +75,7 @@ def _build_tts(tenant: TenantConfig):
         return openai.TTS(
             base_url=config.LOCAL_TTS_BASE_URL,
             api_key="kokoro",                     # Kokoro server ignores the key; must not be empty
-            model="kokoro",
+            model="tts-1",
             voice=config_voice or config.LOCAL_TTS_VOICE,
         )
 
