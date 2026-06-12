@@ -1,0 +1,44 @@
+# =============================================================================
+# Kokoro-82M TTS — Local Docker Service
+# =============================================================================
+# Pulls the official Kokoro-FastAPI image and exposes it on port 8888.
+# This gives you zero-cost, low-latency TTS with an OpenAI-compatible API.
+#
+# Usage:
+#   Start:   docker compose -f docker-compose.tts.yml up -d
+#   Stop:    docker compose -f docker-compose.tts.yml down
+#   Logs:    docker compose -f docker-compose.tts.yml logs -f
+#
+# The service exposes a POST /v1/audio/speech endpoint compatible with the
+# OpenAI TTS API spec, so our agent.py needs zero changes to call it.
+# =============================================================================
+
+services:
+  kokoro-tts:
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:latest   # CPU-optimised build for M1 Mac
+    # For GPU / Apple Silicon MPS acceleration, swap to:
+    # image: ghcr.io/remsky/kokoro-fastapi:latest
+    container_name: kokoro-tts
+    restart: unless-stopped
+    ports:
+      - "8888:8880"   # host:container — Kokoro-FastAPI listens on 8880 internally
+    environment:
+      # Default voice used when none is specified in the request
+      - DEFAULT_VOICE=af_heart
+      # Maximum number of concurrent TTS worker threads
+      - MAX_WORKERS=2
+      # Output sample rate (Hz) — 24000 matches LiveKit's preferred format
+      - SAMPLE_RATE=24000
+    volumes:
+      # Persist downloaded model weights between container restarts
+      - kokoro_models:/app/models
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8880/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s   # Give the model time to load on first boot
+
+volumes:
+  kokoro_models:
+    driver: local
