@@ -10,8 +10,8 @@ import {
 const navigation = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
   { name: "Tenant Hub", href: "#", icon: Users },
-  { name: "Knowledge Vault", href: "#", icon: BookOpen },
-  { name: "Graphify Canvas", href: "#", icon: Network },
+  { name: "Knowledge Vault", href: "/knowledge-vault", icon: BookOpen },
+  { name: "Graphify Canvas", href: "/graphify", icon: Network },
   { name: "Live Calls", href: "#", icon: PhoneCall },
 ];
 
