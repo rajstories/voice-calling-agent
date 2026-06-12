@@ -528,8 +528,8 @@ async def entrypoint(ctx: agents.JobContext):
             # Greeting text comes from TenantConfig so it is tenant-specific.
             greeting_text = (
                 tenant.initial_greeting
-                or f"Hello! This is {tenant.agent_name} from {tenant.company_name}. "
-                   "Can I have two minutes of your time?"
+                or f"Namaste! Main {tenant.agent_name} bol raha hoon, {tenant.company_name} se. "
+                   "Kya aapke paas do minute hain?"
             )
             await session.say(greeting_text, allow_interruptions=False)
 
@@ -541,8 +541,8 @@ async def entrypoint(ctx: agents.JobContext):
         logger.info(f"[{tenant.tenant_id}] Inbound call detected. Speaking fallback greeting.")
         fallback_text = (
             tenant.fallback_greeting
-            or f"Hello! You've reached {tenant.agent_name} at {tenant.company_name}. "
-               "How can I help you today?"
+            or f"Namaste! Aap {tenant.agent_name} se baat kar rahe hain, {tenant.company_name}. "
+               "Main aapki kaise madad kar sakta hoon?"
         )
         await session.say(fallback_text, allow_interruptions=False)
 

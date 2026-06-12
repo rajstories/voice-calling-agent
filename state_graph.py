@@ -48,9 +48,12 @@ In agent.py, after Deepgram fires an on_transcript event:
 """
 
 import logging
+import os
+import json
 from typing import TypedDict, Annotated, Sequence
 import operator
 
+import httpx
 from langgraph.graph import StateGraph, END
 
 from rag_client import query_knowledge_base
@@ -126,8 +129,8 @@ async def greeting_node(state: State) -> dict:
     logger.info(f"[{state['tenant_id']}] greeting_node → advancing to discovery")
 
     greeting_text = (
-        "Hello! Thank you for taking my call. "
-        "I have a few quick questions to understand how I can help you best."
+        "Namaste! Mera call lene ke liye dhanyavaad. "
+        "Main aapki kaise madad kar sakta hoon, yeh samajhne ke liye kuch sawaal poochna chahta hoon."
     )
 
     return {
@@ -151,125 +154,135 @@ async def greeting_node(state: State) -> dict:
 
 async def discovery_node(state: State) -> dict:
     """
-    Classify the customer's latest input and route to the correct next stage.
+    LLM-powered discovery node.
 
-    Routing signal: this node writes `current_stage` which route_from_discovery()
-    reads to decide which edge to follow.
+    Calls Qwen via Ollama's OpenAI-compatible chat/completions endpoint to
+    generate a contextual, natural Hindi/Hinglish response. The LLM also
+    classifies the conversation stage for graph routing.
 
-    Uses conversation history to vary responses and avoid repetition.
+    Falls back to a safe generic response if the LLM call fails.
     """
-    user_input = state.get("last_user_input", "").lower()
+    user_input = state.get("last_user_input", "").strip()
     tenant_id  = state["tenant_id"]
     messages   = state.get("messages", [])
+    rag_context = state.get("rag_context", "")
 
-    # Count how many assistant turns have occurred (for response variation)
-    assistant_turn_count = sum(
-        1 for m in messages
-        if (isinstance(m, dict) and m.get("role") == "assistant")
-    )
-
-    logger.info(f"[{tenant_id}] discovery_node processing: {user_input!r} (turn #{assistant_turn_count})")
+    logger.info(f"[{tenant_id}] discovery_node processing via LLM: {user_input!r}")
 
     # ------------------------------------------------------------------
-    # Rule-based routing with expanded keyword coverage
+    # Build the LLM prompt
     # ------------------------------------------------------------------
-    objection_keywords   = ["expensive", "costly", "price", "discount", "mahanga",
-                             "problem", "other brand", "competitor", "not interested",
-                             "busy", "no thanks", "don't want", "waste", "scam", "fraud"]
-    rag_trigger_keywords = ["what", "how much", "warranty", "specification",
-                             "availability", "stock", "inverter", "kwp", "capacity",
-                             "details", "features", "model", "panel", "battery",
-                             "subsidy", "emi", "loan", "finance", "install"]
-    end_keywords         = ["bye", "goodbye", "ok send", "whatsapp", "call later",
-                             "no need", "not now", "hang up", "cut the call",
-                             "don't call", "stop calling", "remove my number"]
-    why_calling_keywords = ["why are you calling", "why you calling", "who are you",
-                             "who is this", "what is this about", "what do you want",
-                             "kya chahiye", "kaun", "kyun call", "why call",
-                             "what's this call about", "purpose of this call"]
-    greeting_keywords    = ["hello", "hi", "yes", "yeah", "haan", "ok", "okay",
-                             "sure", "tell me", "go ahead", "listening", "speak",
-                             "bol", "bolo", "haa", "acha", "theek hai", "fine"]
+    system_prompt = """You are Raj, a friendly and professional sales executive from UPM Consultancy.
+You are making an outbound call to a potential customer about Tata Solar panel installations.
 
-    # --- Route: End the call ---
-    if any(kw in user_input for kw in end_keywords):
-        next_stage = "end"
-        reply = "Understood, sir. I'll send you the details on WhatsApp. Have a great day!"
+IMPORTANT RULES:
+1. ALWAYS respond in Hindi or Hinglish (mix of Hindi and English). Never respond in pure English.
+2. Keep your responses SHORT — maximum 2 sentences. This is a phone call, not an essay.
+3. Be natural, warm, and conversational — like a real salesperson on the phone.
+4. Listen to what the customer says and respond DIRECTLY to their question or concern.
+5. If the customer asks "why are you calling" or "kaun bol raha hai", introduce yourself and explain the purpose clearly.
+6. If the customer raises an objection (too expensive, not interested, busy), acknowledge it respectfully.
+7. If the customer asks about pricing, specifications, or technical details, say you'll check and share.
+8. Never repeat the same response twice. Always progress the conversation.
+9. If the customer seems annoyed, be polite and offer to call back or send details on WhatsApp.
 
-    # --- Route: Customer asks why we're calling ---
-    elif any(kw in user_input for kw in why_calling_keywords):
-        next_stage = "done"
+YOUR GOAL: Qualify the customer for a Tata Solar panel installation by understanding:
+- Whether it's residential or commercial
+- Their approximate monthly electricity bill
+- Their roof type (RCC/tin shed)
+- Their interest level
+
+PRODUCT KNOWLEDGE:
+- Tata Solar panels: 3kW to 10kW systems for homes and businesses
+- Approximate pricing: ₹2-5 lakh depending on system size
+- Government subsidy: Up to 40% for residential under PM Surya Ghar scheme
+- EMI options available with zero down payment
+- 25-year performance warranty on panels
+
+At the END of your response, on a NEW LINE, write exactly one of these stage tags:
+[STAGE:discovery] — if the conversation should continue with qualifying questions
+[STAGE:objection] — if the customer raised a price/trust/competitor objection
+[STAGE:rag_lookup] — if the customer asked a specific technical/pricing question you need to look up
+[STAGE:end] — if the customer wants to end the call or you should wrap up"""
+
+    if rag_context:
+        system_prompt += f"\n\nRELEVANT PRODUCT DATA (use this to answer the customer's question):\n{rag_context}"
+
+    # Build conversation history for the LLM
+    llm_messages = [{"role": "system", "content": system_prompt}]
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") in ("user", "assistant"):
+            llm_messages.append({"role": m["role"], "content": m["content"]})
+    # Add the current user input
+    llm_messages.append({"role": "user", "content": user_input})
+
+    # ------------------------------------------------------------------
+    # Call Ollama via OpenAI-compatible API
+    # ------------------------------------------------------------------
+    ollama_base = os.getenv("LOCAL_LLM_BASE_URL", "http://localhost:11434/v1")
+    ollama_model = os.getenv("LOCAL_LLM_MODEL", "qwen:latest")
+
+    reply = ""
+    next_stage = "done"
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{ollama_base}/chat/completions",
+                json={
+                    "model": ollama_model,
+                    "messages": llm_messages,
+                    "temperature": 0.7,
+                    "max_tokens": 200,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            raw_reply = data["choices"][0]["message"]["content"].strip()
+
+        logger.info(f"[{tenant_id}] LLM raw response: {raw_reply!r}")
+
+        # Parse stage tag from the response
+        lines = raw_reply.split("\n")
+        stage_line = ""
+        reply_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("[STAGE:"):
+                stage_line = stripped
+            else:
+                reply_lines.append(line)
+
+        reply = "\n".join(reply_lines).strip()
+
+        # Extract stage from tag
+        if "[STAGE:objection]" in stage_line:
+            next_stage = "objection"
+        elif "[STAGE:rag_lookup]" in stage_line:
+            next_stage = "rag_lookup"
+        elif "[STAGE:end]" in stage_line:
+            next_stage = "end"
+        else:
+            next_stage = "done"  # default: continue discovery, end this invocation
+
+        # Clean up any leftover stage tags that might be in the reply text
+        for tag in ["[STAGE:discovery]", "[STAGE:objection]", "[STAGE:rag_lookup]", "[STAGE:end]"]:
+            reply = reply.replace(tag, "").strip()
+
+    except Exception as exc:
+        logger.error(f"[{tenant_id}] LLM call failed, using fallback: {exc}", exc_info=True)
+        # Graceful fallback — use a safe generic Hindi response
         reply = (
-            "Great question, sir! I'm calling from UPM Consultancy. "
-            "We help businesses and homeowners save up to 90% on their electricity bills "
-            "with Tata Solar panel installations. I just wanted to check if you've been "
-            "considering solar for your property?"
+            "Ji sir, main UPM Consultancy se Raj bol raha hoon. "
+            "Hum Tata Solar panels ki installation karte hain. "
+            "Kya aap solar ke baare mein jaanna chahenge?"
         )
-
-    # --- Route: Objection handling ---
-    elif any(kw in user_input for kw in objection_keywords):
-        next_stage = "objection"
-        reply = "I understand your concern, sir. Let me address that."
-
-    # --- Route: RAG knowledge lookup ---
-    elif any(kw in user_input for kw in rag_trigger_keywords):
-        next_stage = "rag_lookup"
-        reply = "Good question, sir. Let me look that up for you right now."
-
-    # --- Route: Greeting / affirmative / short answer ---
-    elif any(kw in user_input for kw in greeting_keywords):
         next_stage = "done"
-        # Vary the response based on how far we are in the conversation
-        if assistant_turn_count <= 1:
-            reply = (
-                "Thank you for your time, sir! I'm calling from UPM Consultancy. "
-                "We specialise in Tata Solar panel installations. "
-                "Are you a homeowner, or is this for a commercial project?"
-            )
-        elif assistant_turn_count <= 3:
-            reply = (
-                "That's great to know! Could you tell me roughly how much your "
-                "monthly electricity bill is? This helps me recommend the right system size."
-            )
-        else:
-            reply = (
-                "Perfect. Based on what you've shared, I think a 3kW to 5kW system "
-                "could work well for you. Would you like me to share a detailed quote?"
-            )
 
-    # --- Default: Contextual qualifying response based on turn count ---
-    else:
-        next_stage = "done"
-        if assistant_turn_count <= 1:
-            reply = (
-                "Thank you for sharing that, sir. I'm calling from UPM Consultancy "
-                "regarding Tata Solar panel installations. Could you tell me — "
-                "are you looking at solar for a residential property or a commercial project?"
-            )
-        elif assistant_turn_count <= 2:
-            reply = (
-                "Got it, sir. That's helpful. And roughly how much is your current "
-                "monthly electricity bill? This helps me suggest the best system for you."
-            )
-        elif assistant_turn_count <= 3:
-            reply = (
-                "Thank you. Based on what you've shared, a 3kW to 5kW Tata Solar setup "
-                "could significantly reduce your bills. Shall I share the pricing details?"
-            )
-        elif assistant_turn_count <= 4:
-            reply = (
-                "We have some excellent financing options as well — zero down payment EMIs "
-                "and government subsidies that can cover up to 40% of the cost. "
-                "Would you like me to send you a detailed brochure on WhatsApp?"
-            )
-        else:
-            reply = (
-                "I appreciate your time, sir. Let me share a complete proposal "
-                "with pricing and subsidy details on WhatsApp. Would that work for you?"
-            )
-    # ------------------------------------------------------------------
+    if not reply:
+        reply = "Ji sir, main samajh gaya. Aap batayein, kaise madad kar sakta hoon?"
 
-    logger.info(f"[{tenant_id}] discovery_node → next_stage={next_stage}")
+    logger.info(f"[{tenant_id}] discovery_node → next_stage={next_stage}, reply={reply!r}")
 
     return {
         "messages": [
